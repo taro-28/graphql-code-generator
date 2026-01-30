@@ -864,6 +864,51 @@ export class SelectionSetToObject<Config extends ParsedDocumentsConfig = ParsedD
     };
   }
 
+  /**
+   * Recursively collects $fragmentName values from child fragments spread with @unmask.
+   * When a child fragment itself spreads other fragments with @unmask,
+   * it inherits those children's $fragmentName values.
+   */
+  protected collectUnmaskedFragmentNames(
+    selectionSet: SelectionSetNode | undefined,
+    fragmentSuffix: string
+  ): Set<string> {
+    const collected = new Set<string>();
+
+    if (!selectionSet || !this._config.customDirectives?.apolloUnmask) {
+      return collected;
+    }
+
+    for (const selection of selectionSet.selections) {
+      if (selection.kind === Kind.FRAGMENT_SPREAD) {
+        const hasUnmask = selection.directives?.some(d => d.name.value === 'unmask');
+        if (hasUnmask) {
+          const childFragment = this._loadedFragments.find(lf => lf.name === selection.name.value);
+          if (childFragment) {
+            // Check if the child fragment also spreads other fragments with @unmask
+            const childUnmaskedNames = this.collectUnmaskedFragmentNames(
+              childFragment.node.selectionSet,
+              fragmentSuffix
+            );
+
+            if (childUnmaskedNames.size > 0) {
+              // Child fragment has @unmask spreads, inherit their $fragmentName values
+              for (const name of childUnmaskedNames) {
+                collected.add(name);
+              }
+            } else {
+              // Child fragment has no @unmask spreads, use its own name
+              const childFragmentTypeName = this.buildFragmentTypeName(selection.name.value, fragmentSuffix);
+              collected.add(childFragmentTypeName);
+            }
+          }
+        }
+      }
+    }
+
+    return collected;
+  }
+
   public transformFragmentSelectionSetToTypes(
     fragmentName: string,
     fragmentSuffix: string,
@@ -900,8 +945,17 @@ export class SelectionSetToObject<Config extends ParsedDocumentsConfig = ParsedD
       };
     });
 
+    // Collect $fragmentName values from child fragments spread with @unmask.
+    // When @unmask children exist, the parent's $fragmentName contains only those children's names.
+    // This allows the parent fragment to be assignable to child fragment types.
+    const unmaskedFragmentNames = this.collectUnmaskedFragmentNames(this._selectionSet, fragmentSuffix);
+    const fragmentNameUnion =
+      unmaskedFragmentNames.size > 0
+        ? [...unmaskedFragmentNames].map(n => `'${n}'`).join(' | ')
+        : `'${mergedTypeString}'`;
+
     const fragmentMaskPartial =
-      this._config.inlineFragmentTypes === 'mask' ? ` & { ' $fragmentName'?: '${mergedTypeString}' }` : '';
+      this._config.inlineFragmentTypes === 'mask' ? ` & { ' $fragmentName'?: ${fragmentNameUnion} }` : '';
 
     // TODO: unify with line 308 from base-documents-visitor
     const dependentTypesContent = this._config.extractAllFieldsToTypes
